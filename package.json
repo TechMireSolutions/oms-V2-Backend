@@ -1,0 +1,17 @@
+{
+  "name": "oms-backend",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.12.0",
+  "engines": { "node": ">=20.11.0" },
+  "scripts": {
+    "build:packages": "pnpm --filter @oms/dto --filter @oms/config --filter @oms/crypto --filter @oms/db run build",
+    "build": "pnpm build:packages && pnpm --filter @oms/backend exec nest build",
+    "dev": "pnpm --filter @oms/backend dev",
+    "start": "node --env-file=.env apps/backend/dist/main.js",
+    "prisma:generate": "pnpm --filter @oms/db exec prisma generate",
+    "prisma:migrate": "pnpm --filter @oms/db exec prisma migrate dev",
+    "seed": "node --env-file=.env apps/backend/seed.mjs"
+  },
+  "workspaces": ["apps/*", "packages/*"]
+}

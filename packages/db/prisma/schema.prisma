@@ -1,0 +1,670 @@
+// OMS Prisma schema — SQLite for local development.
+// All IDs are UUIDs (stored as TEXT); Json fields are stored as TEXT strings.
+// Sensitive columns are app-encrypted before insert where noted.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity & Access Management ──────────────────────────────────────
+
+model User {
+  id              String          @id @default(uuid())
+  email           String          @unique
+  passwordHash    String          // Argon2id encoded string (PHC format)
+  isActive        Boolean         @default(true)
+  mfaEnrolled     Boolean         @default(false)
+  failedAttempts  Int             @default(0)
+  lockedUntil     DateTime?
+  lastLoginAt     DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  roles           UserRole[]
+  mfaSecret       MfaSecret?
+  refreshSessions RefreshSession[]
+  loginAttempts   LoginAttempt[]
+
+  @@index([email])
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  name        String
+  description String?
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  description String?
+  createdAt   DateTime         @default(now())
+
+  roles       RolePermission[]
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  locationId String?           // optional ABAC scope (multi-location)
+  assignedAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId],       references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model RefreshSession {
+  id            String    @id @default(uuid())
+  userId        String
+  tokenHash     String    @unique
+  userAgent     String?
+  ipAddress     String?
+  issuedAt      DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model MfaSecret {
+  userId      String    @id
+  secretEnc   Bytes                    // app-encrypted TOTP shared secret
+  algorithm   String    @default("SHA1")
+  digits      Int       @default(6)
+  period      Int       @default(30)
+  recoveryEnc Bytes?                   // encrypted recovery codes (JSON)
+  verifiedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model LoginAttempt {
+  id          String       @id @default(uuid())
+  userId      String?
+  email       String
+  ipAddress   String?
+  userAgent   String?
+  outcome     String
+  reason      String?
+  attemptedAt DateTime     @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([email, attemptedAt])
+  @@index([ipAddress, attemptedAt])
+}
+
+// Status/enum-like values are stored as String (SQLite has no native enums).
+// The canonical value sets live in the Zod schemas in @oms/dto.
+
+// ─── Admissions & Welfare (Module 2) ───────────────────────────────────
+//
+// Sensitive PII columns suffixed `Enc` hold AES-256-GCM ciphertext produced
+// by @oms/crypto (never plaintext). `customData` is a JSON string.
+
+model ApplicantProfile {
+  id              String   @id @default(uuid())
+  userId          String?  @unique
+  fullName        String
+  email           String
+  phone           String?
+  nationalIdEnc   String?
+  nationalIdBidx  String?
+  dateOfBirthEnc  String?
+  addressEnc      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  applications    Application[]
+  welfareRequests WelfareRequest[]
+
+  @@index([email])
+  @@index([nationalIdBidx])
+}
+
+model Application {
+  id          String            @id @default(uuid())
+  reference   String            @unique
+  applicantId String
+  programKey  String
+  status      String            @default("SUBMITTED")
+  customData  String            @default("{}")   // JSON string
+  submittedAt DateTime          @default(now())
+  decidedAt   DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  applicant   ApplicantProfile  @relation(fields: [applicantId], references: [id], onDelete: Restrict)
+
+  @@index([applicantId])
+  @@index([status])
+  @@index([programKey, status])
+}
+
+model WelfareRequest {
+  id                     String        @id @default(uuid())
+  reference              String        @unique
+  applicantId            String
+  type                   String
+  status                 String        @default("SUBMITTED")
+  requestedAmount        Decimal?
+  financialBackgroundEnc String?
+  supportingNotesEnc     String?
+  customData             String        @default("{}")  // JSON string
+  submittedAt            DateTime      @default(now())
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  applicant     ApplicantProfile      @relation(fields: [applicantId], references: [id], onDelete: Restrict)
+  recommendation WelfareRecommendation?
+  decision       WelfareDecision?
+
+  @@index([applicantId])
+  @@index([status])
+  @@index([type, status])
+}
+
+model WelfareRecommendation {
+  id                String           @id @default(uuid())
+  requestId         String           @unique
+  recommendedBy     String
+  outcome           String
+  recommendedAmount Decimal?
+  rationaleEnc      String?
+  createdAt         DateTime         @default(now())
+
+  request WelfareRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([recommendedBy])
+}
+
+model WelfareDecision {
+  id               String          @id @default(uuid())
+  requestId        String          @unique
+  decidedBy        String
+  outcome          String
+  approvedAmount   Decimal?
+  notesEnc         String?
+  financeJournalId String?
+  decidedAt        DateTime        @default(now())
+
+  request WelfareRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([decidedBy])
+}
+
+// ─── Core Finance & Double-Entry Accounting (Module 3) ─────────────────
+
+model AccountingPeriod {
+  id        String       @id @default(uuid())
+  code      String       @unique
+  startsOn  DateTime
+  endsOn    DateTime
+  status    String       @default("OPEN")
+  lockedAt  DateTime?
+  lockedBy  String?
+  createdAt DateTime     @default(now())
+
+  entries JournalEntry[]
+
+  @@index([status])
+  @@index([startsOn, endsOn])
+}
+
+model Account {
+  id         String      @id @default(uuid())
+  code       String      @unique
+  name       String
+  type       String
+  normalSide String
+  parentId   String?
+  isActive   Boolean     @default(true)
+  isPostable Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  parent   Account?  @relation("AccountTree", fields: [parentId], references: [id])
+  children Account[] @relation("AccountTree")
+  lines    JournalLine[]
+
+  @@index([type])
+  @@index([parentId])
+}
+
+model JournalEntry {
+  id           String        @id @default(uuid())
+  entryNo      String        @unique
+  periodId     String
+  entryDate    DateTime
+  memo         String?
+  status       String        @default("PENDING_APPROVAL")
+  currency     String        @default("PHP")
+  preparedById String
+  postedById   String?
+  postedAt     DateTime?
+  reversalOfId String?       @unique
+  source       String        @default("manual")
+  sourceRef    String?
+  createdAt    DateTime      @default(now())
+
+  period     AccountingPeriod @relation(fields: [periodId], references: [id])
+  reversalOf JournalEntry?    @relation("Reversal", fields: [reversalOfId], references: [id])
+  reversedBy JournalEntry?    @relation("Reversal")
+  lines      JournalLine[]
+
+  @@index([periodId, status])
+  @@index([entryDate])
+  @@index([source, sourceRef])
+}
+
+model JournalLine {
+  id        String   @id @default(uuid())
+  entryId   String
+  entryDate DateTime
+  accountId String
+  debit     Decimal  @default(0)
+  credit    Decimal  @default(0)
+  lineMemo  String?
+  lineNo    Int
+
+  entry   JournalEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  account Account      @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([entryId, lineNo])
+  @@index([accountId])
+  @@index([entryId])
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNo      String        @unique
+  customerRef    String
+  status         String        @default("ISSUED")
+  currency       String        @default("PHP")
+  subtotal       Decimal
+  taxTotal       Decimal       @default(0)
+  total          Decimal
+  issuedOn       DateTime
+  dueOn          DateTime?
+  journalEntryId String?       @unique
+  createdById    String
+  createdAt      DateTime      @default(now())
+
+  lines InvoiceLine[]
+
+  @@index([customerRef])
+  @@index([status])
+}
+
+model InvoiceLine {
+  id               String  @id @default(uuid())
+  invoiceId        String
+  description      String
+  quantity         Decimal @default(1)
+  unitPrice        Decimal
+  lineTotal        Decimal
+  revenueAccountId String
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+// ─── Customisation & Metadata Engine (Module 11, Part M) ───────────────
+
+model FieldDefinition {
+  id              String           @id @default(uuid())
+  entityType      String
+  key             String
+  version         Int              @default(1)
+  status          String           @default("DRAFT")
+  label           String
+  fieldType       String
+  config          String           @default("{}")  // JSON string
+  uiSchema        String           @default("{}")  // JSON string
+  required        Boolean          @default(false)
+  readPermission  String?
+  writePermission String?
+  supersedesId    String?          @unique
+  createdById     String
+  publishedAt     DateTime?
+  archivedAt      DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  supersedes   FieldDefinition? @relation("FieldLineage", fields: [supersedesId], references: [id])
+  supersededBy FieldDefinition? @relation("FieldLineage")
+
+  @@unique([entityType, key, version])
+  @@index([entityType, key, status])
+  @@index([status])
+}
+
+model FormDefinition {
+  id           String           @id @default(uuid())
+  entityType   String
+  key          String
+  version      Int              @default(1)
+  status       String           @default("DRAFT")
+  title        String
+  sections     String           @default("[]")  // JSON string
+  uiSchema     String           @default("{}")  // JSON string
+  supersedesId String?          @unique
+  createdById  String
+  publishedAt  DateTime?
+  archivedAt   DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  supersedes   FormDefinition? @relation("FormLineage", fields: [supersedesId], references: [id])
+  supersededBy FormDefinition? @relation("FormLineage")
+
+  @@unique([key, version])
+  @@index([key, status])
+  @@index([entityType, status])
+  @@index([status])
+}
+
+// ─── AI / LLM Assistant (Module 10, Part F) ────────────────────────────
+
+model PromptTemplate {
+  id              String           @id @default(uuid())
+  key             String
+  version         Int              @default(1)
+  status          String           @default("DRAFT")
+  description     String?
+  template        String
+  variables       String           @default("[]")  // JSON string
+  defaultProvider String           @default("OLLAMA")
+  defaultModel    String?
+  createdById     String
+  publishedAt     DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@unique([key, version])
+  @@index([key, status])
+}
+
+model AiRequestLog {
+  id             String             @id @default(uuid())
+  actorId        String
+  roleSnapshot   String
+  templateKey    String?
+  provider       String
+  model          String
+  classification String
+  promptHash     String
+  promptRedacted String?
+  responseHash   String?
+  inputTokens    Int                @default(0)
+  outputTokens   Int                @default(0)
+  estimatedCost  Decimal            @default(0)
+  outputKind     String             @default("draft")
+  createdAt      DateTime           @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([provider, createdAt])
+}
+
+// ─── Branding & Theming (Module 12) ────────────────────────────────────
+
+model BrandProfile {
+  id          String           @id @default(uuid())
+  scope       String           @default("GLOBAL")
+  locationId  String?
+  version     Int              @default(1)
+  status      String           @default("DRAFT")
+  appName     String
+  tagline     String?
+  footerText  String?
+  imagery     String           @default("{}")  // JSON string
+  createdById String
+  publishedAt DateTime?
+  archivedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  themeTokens ThemeTokens?
+  assets      BrandAsset[]
+
+  @@unique([scope, locationId, version])
+  @@index([scope, locationId, status])
+  @@index([status])
+}
+
+model ThemeTokens {
+  id             String   @id @default(uuid())
+  brandProfileId String   @unique
+  tokens         String   @default("{}")  // JSON string
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  brandProfile BrandProfile @relation(fields: [brandProfileId], references: [id], onDelete: Cascade)
+}
+
+model BrandAsset {
+  id             String   @id @default(uuid())
+  brandProfileId String
+  kind           String
+  objectKey      String
+  mimeType       String
+  sizeBytes      Int
+  createdAt      DateTime @default(now())
+
+  brandProfile BrandProfile @relation(fields: [brandProfileId], references: [id], onDelete: Cascade)
+
+  @@index([brandProfileId])
+}
+
+// ─── Audit & Logging (Module 7) ────────────────────────────────────────
+// Append-only immutable event store. Enforced read-only via SQLite trigger.
+model AuditEvent {
+  id         String   @id @default(uuid())
+  actorId    String
+  action     String
+  entityType String
+  entityId   String
+  beforeHash String?
+  afterHash  String?
+  context    String?            // JSON string
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action])
+}
+
+// ─── Notification (Module 8) ───────────────────────────────────────────
+model NotificationTemplate {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  channel   String   @default("email")   // email | sms | inapp
+  subject   String?
+  body      String
+  createdAt DateTime @default(now())
+}
+
+model NotificationLog {
+  id         String   @id @default(uuid())
+  template   String
+  channel    String   @default("email")
+  toUserId   String?
+  toAddress  String?
+  payload    String?            // JSON string
+  status     String   @default("QUEUED")  // QUEUED | SENT | FAILED
+  error      String?
+  createdAt  DateTime @default(now())
+  sentAt     DateTime?
+
+  @@index([toUserId, createdAt])
+  @@index([status])
+}
+
+// ─── Operations & Asset Management (Module 4) ──────────────────────────
+model Asset {
+  id          String   @id @default(uuid())
+  tag         String   @unique
+  name        String
+  category    String   @default("hardware")
+  status      String   @default("AVAILABLE")  // AVAILABLE | ALLOCATED | MAINTENANCE | RETIRED
+  acquiredOn  DateTime?
+  cost        Decimal?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  allocations AssetAllocation[]
+  @@index([status])
+}
+
+model AssetAllocation {
+  id         String   @id @default(uuid())
+  assetId    String
+  holderId   String
+  allocatedAt DateTime @default(now())
+  returnedAt DateTime?
+  note       String?
+
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  @@index([assetId])
+  @@index([holderId])
+}
+
+model FacilityArea {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  capacity  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  tickets MaintenanceTicket[]
+}
+
+model MaintenanceTicket {
+  id          String   @id @default(uuid())
+  reference   String   @unique
+  facilityId  String?
+  title       String
+  description String?
+  priority    String   @default("MEDIUM")   // LOW | MEDIUM | HIGH
+  status      String   @default("OPEN")      // OPEN | IN_PROGRESS | RESOLVED
+  reportedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  facility FacilityArea? @relation(fields: [facilityId], references: [id])
+  @@index([status])
+}
+
+// ─── Policy & Compliance Management (Module 6) ─────────────────────────
+model PolicyDocument {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  title     String
+  category  String   @default("general")
+  createdAt DateTime @default(now())
+
+  versions PolicyVersion[]
+}
+
+model PolicyVersion {
+  id          String   @id @default(uuid())
+  policyId    String
+  version     Int      @default(1)
+  status      String   @default("DRAFT")   // DRAFT | PUBLISHED | ARCHIVED
+  body        String
+  publishedAt DateTime?
+  createdById String
+  createdAt   DateTime @default(now())
+
+  policy PolicyDocument @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  acknowledgements AcknowledgementRecord[]
+  @@unique([policyId, version])
+  @@index([status])
+}
+
+model AcknowledgementRecord {
+  id              String   @id @default(uuid())
+  policyVersionId String
+  userId          String
+  acknowledgedAt  DateTime @default(now())
+
+  policyVersion PolicyVersion @relation(fields: [policyVersionId], references: [id], onDelete: Cascade)
+  @@unique([policyVersionId, userId])
+  @@index([userId])
+}
+
+// ─── Integration Gateway (Module 9) ────────────────────────────────────
+model SyncJob {
+  id         String   @id @default(uuid())
+  kind       String                          // moodle.grades | moodle.provision
+  status     String   @default("PENDING")    // PENDING | RUNNING | SUCCESS | FAILED
+  payload    String?            // JSON string
+  result     String?            // JSON string
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now())
+  finishedAt DateTime?
+
+  @@index([kind, status])
+}
+
+model IntegrationLog {
+  id        String   @id @default(uuid())
+  jobId     String?
+  level     String   @default("info")
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+}
+
+// ─── Project Progress Tracker ──────────────────────────────────────────
+// Date fields are stored as "YYYY-MM-DD" strings (date-only), mirroring the
+// reference Sequelize DATEONLY semantics without timezone drift.
+model ProjectTracker {
+  id                 Int      @id @default(autoincrement())
+  project_name       String
+  website_link       String?
+  ojt_name           String?
+  framework          String?
+  lead_name          String?
+  project_given_date String?
+  start_date         String?
+  end_date           String?
+  deadline           String?
+  status             String   @default("Not Started")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@map("project_trackers")
+}

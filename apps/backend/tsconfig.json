@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./.tsbuildinfo",
+    "types": ["node", "jest"]
+  },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../packages/dto" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/crypto" }
+  ]
+}
